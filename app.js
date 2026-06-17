@@ -480,8 +480,10 @@ class ThreeMFParser {
                 : json.filament_settings_id;
             }
             if (json.filament_colour) {
-              const c = Array.isArray(json.filament_colour) ? json.filament_colour[0] : json.filament_colour;
-              if (c) allColors.push(c);
+              const fcStr = Array.isArray(json.filament_colour) ? json.filament_colour.join(',') : String(json.filament_colour);
+              fcStr.split(',').forEach(c => {
+                if (c.trim()) allColors.push(c.trim());
+              });
             }
           } catch { /* not JSON */ }
         } catch { /* skip */ }
@@ -634,37 +636,32 @@ class ModelViewer {
     window.addEventListener('resize', this._resizeHandler);
   }
 
-  _setupLights() {
-    // Strong ambient
-    this.scene.add(new THREE.AmbientLight(0xffffff, 1.5));
 
-    // Key light — top right front
-    const key = new THREE.DirectionalLight(0xffffff, 2.5);
-    key.position.set(200, 500, 300);
+
+  _setupLights() {
+    // Miękkie oświetlenie otoczenia
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+    this.scene.add(hemiLight);
+
+    // Główne światło rzucające mocne cienie - kluczowe dla białych obiektów!
+    const key = new THREE.DirectionalLight(0xffffff, 1.2);
+    key.position.set(100, 200, 150);
+    key.castShadow = true;
+    key.shadow.mapSize.width = 2048;
+    key.shadow.mapSize.height = 2048;
+    key.shadow.bias = -0.0005;
     this.scene.add(key);
 
-    // Fill — left side
-    const fill = new THREE.DirectionalLight(0xb0c4ff, 1.5);
-    fill.position.set(-300, 300, -100);
+    // Światło wypełniające z przeciwnej strony (niebieskawe)
+    const fill = new THREE.DirectionalLight(0xb0c4ff, 0.6);
+    fill.position.set(-150, 100, -100);
     this.scene.add(fill);
 
-    // Rim — behind
-    const rim = new THREE.DirectionalLight(0xffcc88, 1.0);
-    rim.position.set(0, 200, -400);
+    // Światło od tyłu (ciepłe)
+    const rim = new THREE.DirectionalLight(0xffcc88, 0.5);
+    rim.position.set(0, 150, -250);
     this.scene.add(rim);
 
-    // Bottom fill — reduce dark undersides
-    const bottom = new THREE.DirectionalLight(0x8888cc, 0.8);
-    bottom.position.set(0, -200, 100);
-    this.scene.add(bottom);
-
-    // Front fill
-    const front = new THREE.DirectionalLight(0xffffff, 0.8);
-    front.position.set(0, 100, 500);
-    this.scene.add(front);
-
-    // Hemisphere
-    this.scene.add(new THREE.HemisphereLight(0xeeeeff, 0x555566, 1.0));
   }
 
   _addBuildPlateGrid() {
@@ -697,19 +694,23 @@ class ModelViewer {
             try {
               const json = JSON.parse(raw);
               if (json.filament_colour) {
-                const c = Array.isArray(json.filament_colour) ? json.filament_colour[0] : json.filament_colour;
-                if (c) allColors.push(c);
+                const fcStr = Array.isArray(json.filament_colour) ? json.filament_colour.join(',') : String(json.filament_colour);
+                fcStr.split(',').forEach(c => {
+                  if (c.trim()) allColors.push(c.trim());
+                });
               }
             } catch { /* skip */ }
           }
         }
         if (allColors.length > 0) {
+          console.log('[ColorExtract] All parsed filament colors:', allColors);
           const isBoring = (c) => {
             const u = c.toUpperCase();
             return u.startsWith('#FFFFFF') || u.startsWith('#000000') || u.startsWith('FFFFFF') || u.startsWith('000000');
           };
           const vibrant = allColors.find(c => !isBoring(c));
           projectColor = (vibrant || allColors[0]).slice(0, 7);
+          console.log('[ColorExtract] Selected vibrant color:', projectColor);
         }
       } catch (e) {
         console.warn('Could not extract color:', e);
@@ -814,16 +815,40 @@ class ModelViewer {
         }
 
         // 3. Użyj materiałów z 3MF (wspiera wielokolorowość), lub zablokowanego domyślnego
-        const applySettings = (m) => {
+        let assignedColor = null;
+        let current = child;
+        
+        while(current) {
+          if (current.name && current.name.includes('BAMBU_EXTRUDER_')) {
+            const match = current.name.match(/BAMBU_EXTRUDER_(\d+)/);
+            if (match) {
+              const extruderIdx = parseInt(match[1]);
+              if (this.filamentColors && this.filamentColors[extruderIdx]) {
+                assignedColor = this.filamentColors[extruderIdx];
+              }
+            }
+            break;
+          }
+          current = current.parent;
+        }
+
+        const applySettings = (m, index) => {
           m.metalness = 0.1;
-          m.roughness = 0.5;
+          m.roughness = 0.7; // Wyższa szorstkość dla lepszego wyglądu plastiku
           m.side = THREE.DoubleSide;
+          
+          if (assignedColor && !m.vertexColors) {
+            m.color.set(assignedColor);
+          } else if (!m.vertexColors && m.color && m.color.getHexString() === 'ffffff' && this.defaultColor) {
+            m.color.set(this.defaultColor);
+          }
         };
 
         if (child.material) {
-          Array.isArray(child.material) ? child.material.forEach(applySettings) : applySettings(child.material);
+          Array.isArray(child.material) ? child.material.forEach((m, i) => applySettings(m, i)) : applySettings(child.material, 0);
         } else {
           child.material = this.modelMaterial;
+          console.log(`[Material] Fallback to modelMaterial for mesh '${child.name}'`);
         }
 
         // 4. Włącz cienie dla widoczności krawędzi
@@ -870,6 +895,76 @@ class ModelViewer {
       if (!resources) return arrayBuffer;
 
       let needsRepack = false;
+
+      // --- WSTRZYKIWANIE KOLORÓW DO 3DMODEL.MODEL ---
+      const allColors = [];
+      for (const [path, file] of Object.entries(zip.files)) {
+        if (/Metadata\/filament_settings_\d+\.config$/i.test(path)) {
+          try {
+            const json = JSON.parse(await file.async('string'));
+            if (json.filament_colour) {
+              const fcStr = Array.isArray(json.filament_colour) ? json.filament_colour.join(',') : String(json.filament_colour);
+              fcStr.split(',').forEach(c => {
+                let hex = c.trim();
+                if (hex) {
+                  if (!hex.startsWith('#')) hex = '#' + hex;
+                  if (hex.length === 7) hex += 'FF';
+                  allColors.push(hex.toUpperCase());
+                }
+              });
+            }
+          } catch {}
+        }
+      }
+
+      const extruderMap = {};
+      const modelSettingsFile = zip.file('Metadata/model_settings.config');
+      if (modelSettingsFile) {
+        const msRaw = await modelSettingsFile.async('string');
+        const msDoc = new DOMParser().parseFromString(msRaw, 'text/xml');
+        
+        msDoc.querySelectorAll('object').forEach(msObj => {
+           const objId = msObj.getAttribute('id');
+           const modelObj = doc.querySelector(`object[id="${objId}"]`);
+           if (!modelObj) return;
+
+           const objMetaArray = Array.from(msObj.children).filter(n => n.tagName === 'metadata' && n.getAttribute('key') === 'extruder');
+           let baseExtruder = 0;
+           if (objMetaArray.length > 0) baseExtruder = parseInt(objMetaArray[0].getAttribute('value')) - 1;
+
+           extruderMap[objId] = baseExtruder;
+
+           const msParts = Array.from(msObj.children).filter(n => n.tagName === 'part');
+           const componentsNode = Array.from(modelObj.children).find(n => n.tagName === 'components');
+           if (componentsNode) {
+              const compArray = Array.from(componentsNode.children).filter(n => n.tagName === 'component');
+              msParts.forEach((part, idx) => {
+                 if (idx < compArray.length) {
+                    const compId = compArray[idx].getAttribute('objectid');
+                    let partExtruder = baseExtruder;
+                    const partMeta = Array.from(part.children).filter(n => n.tagName === 'metadata' && n.getAttribute('key') === 'extruder');
+                    if (partMeta.length > 0) partExtruder = parseInt(partMeta[0].getAttribute('value')) - 1;
+                    
+                    extruderMap[compId] = partExtruder;
+                 }
+              });
+           }
+        });
+      }
+
+      // --- WSTRZYKIWANIE NAZW EXTRUDERÓW DO OBIEKTÓW ---
+      if (Object.keys(extruderMap).length > 0) {
+        needsRepack = true;
+        doc.querySelectorAll('object, component').forEach(obj => {
+           const id = obj.getAttribute('id') || obj.getAttribute('objectid');
+           if (extruderMap[id] !== undefined) {
+              const extruderIdx = extruderMap[id];
+              const oldName = obj.getAttribute('name') || '';
+              obj.setAttribute('name', `BAMBU_EXTRUDER_${extruderIdx}_${oldName}`);
+           }
+        });
+      }
+      // --- KONIEC WSTRZYKIWANIA ---
       const components = doc.querySelectorAll('component');
       const pathsToLoad = new Set();
 
@@ -891,7 +986,14 @@ class ModelViewer {
           const extDoc = new DOMParser().parseFromString(extXml, 'text/xml');
           const extObjects = extDoc.querySelectorAll('resources > object');
           extObjects.forEach((obj) => {
-            resources.appendChild(doc.importNode(obj, true));
+            const imported = doc.importNode(obj, true);
+            const id = imported.getAttribute('id');
+            if (extruderMap && extruderMap[id] !== undefined) {
+               const extruderIdx = extruderMap[id];
+               const oldName = imported.getAttribute('name') || '';
+               imported.setAttribute('name', `BAMBU_EXTRUDER_${extruderIdx}_${oldName}`);
+            }
+            resources.appendChild(imported);
           });
         }
       }
@@ -1287,9 +1389,10 @@ class App {
       if (fileData) {
         let color = project.profiles?.color;
         if (!color && project.settings && project.settings.filament_colour) {
-          const fc = Array.isArray(project.settings.filament_colour) 
-            ? project.settings.filament_colour 
-            : [project.settings.filament_colour];
+          const fcStr = Array.isArray(project.settings.filament_colour) 
+            ? project.settings.filament_colour.join(',') 
+            : String(project.settings.filament_colour);
+          const fc = fcStr.split(',').map(s => s.trim()).filter(Boolean);
           const isBoring = (c) => {
             const u = c.toUpperCase();
             return u.startsWith('#FFFFFF') || u.startsWith('#000000') || u.startsWith('FFFFFF') || u.startsWith('000000');
@@ -1297,6 +1400,12 @@ class App {
           const vibrant = fc.find(c => c && !isBoring(c));
           const c = vibrant || fc[0];
           if (c) color = c.slice(0, 7);
+          
+          this.viewer.filamentColors = fc.map(col => {
+             let hex = col;
+             if (hex && !hex.startsWith('#')) hex = '#' + hex;
+             return hex ? hex.slice(0, 7) : null;
+          });
         }
         await this.viewer.loadModel(fileData, color);
       }
