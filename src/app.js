@@ -563,6 +563,7 @@ class ModelViewer {
     this.animationId = null;
     this.wireframe = false;
     this.autoRotate = false;
+    this.targetAutoRotateSpeed = 2.0;
   }
 
   init() {
@@ -593,7 +594,7 @@ class ModelViewer {
     this.controls = new OrbitControls(this.camera, this.canvas);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
-    this.controls.autoRotateSpeed = 2;
+    this.controls.autoRotateSpeed = 0;
     this.controls.minDistance = 5;
     this.controls.maxDistance = 3000;
 
@@ -608,28 +609,7 @@ class ModelViewer {
 
     // Setup Color Picker
     this.defaultColor = localStorage.getItem('3mf-model-color') || '#00AE42';
-    const colorPicker = document.getElementById('model-color-picker');
-    if (colorPicker) {
-      colorPicker.value = this.defaultColor;
-      colorPicker.addEventListener('input', (e) => {
-        this.defaultColor = e.target.value;
-        localStorage.setItem('3mf-model-color', this.defaultColor);
-        if (this.modelMaterial) {
-          this.modelMaterial.color.set(this.defaultColor);
-        }
-        if (this.model) {
-          this.model.traverse((child) => {
-            if (child.isMesh && child.material) {
-              if (Array.isArray(child.material)) {
-                child.material.forEach(m => m.color.set(this.defaultColor));
-              } else {
-                child.material.color.set(this.defaultColor);
-              }
-            }
-          });
-        }
-      });
-    }
+    this._initCustomColorPicker();
 
     // Resize handler
     this._resizeHandler = () => this._onResize();
@@ -687,7 +667,7 @@ class ModelViewer {
     const progressBar = document.getElementById('viewer-progress-bar');
     const progressText = document.getElementById('viewer-loading-text');
 
-    const updateProgress = async (text, percent, transition = 'transform 0.2s ease-out') => {
+    const updateProgress = async (text, percent, transition = 'transform 0.6s cubic-bezier(0.1, 0.7, 0.1, 1)') => {
       if (progressText) progressText.textContent = text;
       if (progressBar) {
         progressBar.style.transition = transition;
@@ -697,7 +677,7 @@ class ModelViewer {
       await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
     };
 
-    await updateProgress('Extracting metadata...', 10);
+    await updateProgress('Extracting metadata...', 5);
 
     if (!projectColor) {
       try {
@@ -736,10 +716,9 @@ class ModelViewer {
     } else {
       this.defaultColor = localStorage.getItem('3mf-model-color') || '#00AE42';
     }
-    const colorPicker = document.getElementById('model-color-picker');
-    if (colorPicker) colorPicker.value = this.defaultColor;
+    this._updateCustomColorSwatch(this.defaultColor);
 
-    await updateProgress('Preprocessing 3MF...', 25);
+    await updateProgress('Preprocessing 3MF...', 10);
 
     // Cleanup previous
     if (this.model) {
@@ -756,7 +735,7 @@ class ModelViewer {
 
     // Preprocess Bambu Studio 3MF format to fix ThreeMFLoader limitations
     const processedBuffer = await this._preprocessBambu3MF(arrayBuffer, (percent) => {
-      const globalPercent = 25 + (percent / 100) * 30; // Maps 0-100% JSZip to 25-55% global
+      const globalPercent = 10 + (percent / 100) * 45; // Maps 0-100% JSZip to 10-55% global
       if (progressBar) {
         progressBar.style.transition = 'none';
         progressBar.style.transform = `scaleX(${globalPercent / 100})`;
@@ -898,9 +877,8 @@ class ModelViewer {
       }
     });
     if (firstColor) {
-      const colorPicker = document.getElementById('model-color-picker');
-      if (colorPicker) colorPicker.value = firstColor;
       this.defaultColor = firstColor;
+      this._updateCustomColorSwatch(firstColor);
     }
 
     this.model = group;
@@ -1080,13 +1058,32 @@ class ModelViewer {
   }
 
   toggleAutoRotate() {
-    this.autoRotate = !this.autoRotate;
-    this.controls.autoRotate = this.autoRotate;
+    this.setAutoRotate(!this.autoRotate);
     return this.autoRotate;
+  }
+
+  setAutoRotate(state) {
+    this.autoRotate = state;
+    this.controls.autoRotate = state;
+    if (state) {
+      this.controls.autoRotateSpeed = 0;
+    }
+    const btn = document.getElementById('autorotate-btn');
+    if (btn) btn.classList.toggle('active', state);
   }
 
   _animate() {
     this.animationId = requestAnimationFrame(() => this._animate());
+    
+    if (this.autoRotate && this.controls.autoRotate) {
+      if (this.controls.autoRotateSpeed < this.targetAutoRotateSpeed) {
+        this.controls.autoRotateSpeed += (this.targetAutoRotateSpeed - this.controls.autoRotateSpeed) * 0.005;
+        if (this.targetAutoRotateSpeed - this.controls.autoRotateSpeed < 0.01) {
+          this.controls.autoRotateSpeed = this.targetAutoRotateSpeed;
+        }
+      }
+    }
+    
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
   }
@@ -1098,6 +1095,128 @@ class ModelViewer {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+  }
+
+  _initCustomColorPicker() {
+    const btn = document.getElementById('custom-color-btn');
+    const popup = document.getElementById('color-palette-popup');
+    const pickerContainer = document.getElementById('iro-color-picker');
+    
+    if (!btn || !popup || !pickerContainer) return;
+    
+    // Initialize iro.js color picker
+    // Check if iro is loaded (since it's via CDN)
+    if (typeof iro === 'undefined') {
+      console.warn('iro.js not loaded. Color picker disabled.');
+      return;
+    }
+
+    this.colorPickerWidget = new iro.ColorPicker(pickerContainer, {
+      width: 150,
+      color: this.defaultColor,
+      borderWidth: 1,
+      borderColor: '#444',
+      layout: [
+        { 
+          component: iro.ui.Box,
+          options: {}
+        },
+        { 
+          component: iro.ui.Slider,
+          options: {
+            sliderType: 'hue'
+          }
+        }
+      ]
+    });
+    
+    this._updateCustomColorSwatch(this.defaultColor);
+    
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      popup.classList.toggle('hidden');
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.color-picker-wrapper')) {
+        popup.classList.add('hidden');
+      }
+    });
+
+    const hexInput = document.getElementById('color-hex-input');
+    const rInput = document.getElementById('color-r-input');
+    const gInput = document.getElementById('color-g-input');
+    const bInput = document.getElementById('color-b-input');
+
+    const updateInputs = (color) => {
+      if (hexInput && document.activeElement !== hexInput) hexInput.value = color.hexString;
+      if (rInput && document.activeElement !== rInput) rInput.value = color.rgb.r;
+      if (gInput && document.activeElement !== gInput) gInput.value = color.rgb.g;
+      if (bInput && document.activeElement !== bInput) bInput.value = color.rgb.b;
+    };
+
+    // Listen to color changes
+    this.colorPickerWidget.on('color:change', (color) => {
+      const hex = color.hexString;
+      this.defaultColor = hex;
+      localStorage.setItem('3mf-model-color', hex);
+      this._updateCustomColorSwatch(hex);
+      updateInputs(color);
+      
+      if (this.modelMaterial) {
+        this.modelMaterial.color.set(hex);
+      }
+      if (this.model) {
+        this.model.traverse((child) => {
+          if (child.isMesh && child.material) {
+            if (Array.isArray(child.material)) {
+              child.material.forEach(m => m.color.set(hex));
+            } else {
+              child.material.color.set(hex);
+            }
+          }
+        });
+      }
+    });
+
+    // Sync input fields to color picker
+    if (hexInput) {
+      hexInput.addEventListener('change', (e) => {
+        let val = e.target.value.trim();
+        if (!val.startsWith('#')) val = '#' + val;
+        try {
+          this.colorPickerWidget.color.hexString = val;
+        } catch (err) {}
+      });
+    }
+
+    const onRgbChange = () => {
+      try {
+        this.colorPickerWidget.color.rgb = {
+          r: parseInt(rInput.value) || 0,
+          g: parseInt(gInput.value) || 0,
+          b: parseInt(bInput.value) || 0
+        };
+      } catch (err) {}
+    };
+
+    if (rInput) rInput.addEventListener('change', onRgbChange);
+    if (gInput) gInput.addEventListener('change', onRgbChange);
+    if (bInput) bInput.addEventListener('change', onRgbChange);
+    
+    // Initial sync
+    if (this.colorPickerWidget.color) {
+      updateInputs(this.colorPickerWidget.color);
+    }
+  }
+
+  _updateCustomColorSwatch(color) {
+    const swatch = document.getElementById('current-color-swatch');
+    if (swatch) swatch.style.background = color;
+    
+    if (this.colorPickerWidget && this.colorPickerWidget.color.hexString.toLowerCase() !== color.toLowerCase()) {
+      this.colorPickerWidget.color.set(color);
+    }
   }
 
   destroy() {
@@ -1122,16 +1241,11 @@ class ModelViewer {
 // ─────────────────────────────────────
 
 class Toast {
-  static show(message, type = 'success', duration = 3500, showIcon = true) {
+  static show(message, type = 'success', duration = 3500) {
     const container = document.getElementById('toast-container');
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
-    if (showIcon) {
-      const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : 'ℹ️';
-      toast.innerHTML = `<span class="toast-icon">${icon}</span><span>${message}</span>`;
-    } else {
-      toast.innerHTML = `<span>${message}</span>`;
-    }
+    toast.innerHTML = `<span>${message}</span>`;
     container.appendChild(toast);
     setTimeout(() => {
       toast.classList.add('toast-out');
@@ -1174,7 +1288,8 @@ class App {
     this.currentView = 'library'; // 'library' or 'trash'
     this.trashFiles = [];
     this.settings = {
-      gridColumns: 'auto'
+      gridColumns: 'auto',
+      autoRotate: true
     };
   }
 
@@ -1214,6 +1329,10 @@ class App {
     const storedCols = localStorage.getItem('3mf_settings_gridColumns');
     if (storedCols) {
       this.settings.gridColumns = storedCols;
+    }
+    const storedRotate = localStorage.getItem('3mf_settings_autoRotate');
+    if (storedRotate !== null) {
+      this.settings.autoRotate = storedRotate === 'true';
     }
     this._applySettings();
 
@@ -1306,6 +1425,11 @@ class App {
           trashDaysInput.value = this.settings.trashDays || 90;
         }
         
+        const autoRotateInput = document.getElementById('auto-rotate-input');
+        if (autoRotateInput) {
+          autoRotateInput.checked = !!this.settings.autoRotate;
+        }
+        
         settingsModal.classList.remove('hidden');
       });
       closeSettings.addEventListener('click', () => settingsModal.classList.add('hidden'));
@@ -1318,6 +1442,15 @@ class App {
         }
         localStorage.setItem('3mf_settings_gridColumns', this.settings.gridColumns);
         this._applySettings();
+        
+        const autoRotateInput = document.getElementById('auto-rotate-input');
+        if (autoRotateInput) {
+          this.settings.autoRotate = autoRotateInput.checked;
+          localStorage.setItem('3mf_settings_autoRotate', this.settings.autoRotate);
+          if (this.viewer) {
+            this.viewer.setAutoRotate(this.settings.autoRotate);
+          }
+        }
         
         const trashDaysInput = document.getElementById('trash-days-input');
         if (trashDaysInput) {
@@ -1337,10 +1470,83 @@ class App {
         }
         
         settingsModal.classList.add('hidden');
-        Toast.show('Settings saved', 'success', 3500, false);
+        Toast.show('Settings saved', 'success', 3500);
       });
       settingsModal.addEventListener('click', (e) => {
         if (e.target === settingsModal) settingsModal.classList.add('hidden');
+      });
+    }
+
+    // Rename model
+    const renameModelBtn = document.getElementById('rename-model-btn');
+    const renameModal = document.getElementById('rename-modal');
+    const renameInput = document.getElementById('rename-input');
+    const closeRenameBtn = document.getElementById('close-rename');
+    const saveRenameBtn = document.getElementById('save-rename');
+
+    if (renameModelBtn && renameModal && renameInput && closeRenameBtn && saveRenameBtn) {
+      renameModelBtn.addEventListener('click', () => {
+        if (!this.currentProject) return;
+        renameInput.value = this.currentProject.fileName;
+        renameModal.classList.remove('hidden');
+        renameInput.focus();
+        
+        const extIndex = renameInput.value.toLowerCase().lastIndexOf('.3mf');
+        if (extIndex > 0) {
+          renameInput.setSelectionRange(0, extIndex);
+        } else {
+          renameInput.select();
+        }
+      });
+
+      const closeRename = () => {
+        renameModal.classList.add('hidden');
+      };
+
+      closeRenameBtn.addEventListener('click', closeRename);
+      renameModal.addEventListener('click', (e) => {
+        if (e.target === renameModal) closeRename();
+      });
+
+      const executeRename = async () => {
+        if (!this.currentProject) return;
+        let newName = renameInput.value.trim();
+        if (!newName) return;
+        if (!newName.toLowerCase().endsWith('.3mf')) {
+          newName += '.3mf';
+        }
+        
+        if (newName === this.currentProject.fileName) {
+          closeRename();
+          return;
+        }
+        
+        try {
+          const res = await fetch(`/api/files/${encodeURIComponent(this.currentProject.fileName)}/rename`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ newName })
+          });
+          
+          if (!res.ok) {
+            const data = await res.json();
+            throw new Error(data.error || 'Failed to rename file');
+          }
+          
+          this.currentProject.fileName = newName;
+          document.getElementById('detail-title').textContent = newName;
+          Toast.show('Model renamed', 'success');
+          closeRename();
+        } catch (err) {
+          console.error(err);
+          Toast.show(err.message, 'error');
+        }
+      };
+
+      saveRenameBtn.addEventListener('click', executeRename);
+      renameInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') executeRename();
+        if (e.key === 'Escape') closeRename();
       });
     }
 
@@ -1408,10 +1614,6 @@ class App {
 
     // Download
     document.getElementById('download-btn').addEventListener('click', () => this._downloadCurrent());
-    const viewerDownloadBtn = document.getElementById('viewer-download-btn');
-    if (viewerDownloadBtn) {
-      viewerDownloadBtn.addEventListener('click', () => this._downloadCurrent());
-    }
 
     // Viewer controls
     document.getElementById('reset-camera-btn').addEventListener('click', () => {
@@ -1421,7 +1623,7 @@ class App {
       if (this.viewer) e.currentTarget.classList.toggle('active', this.viewer.toggleWireframe());
     });
     document.getElementById('autorotate-btn').addEventListener('click', (e) => {
-      if (this.viewer) e.currentTarget.classList.toggle('active', this.viewer.toggleAutoRotate());
+      if (this.viewer) this.viewer.toggleAutoRotate();
     });
 
     // Delete modal
@@ -1757,6 +1959,7 @@ class App {
 
     try {
       this.viewer.init();
+      this.viewer.setAutoRotate(this.settings.autoRotate);
     } catch (err) {
       console.error('Viewer init error:', err);
       Toast.show('Error initializing 3D viewer', 'error');
@@ -1771,6 +1974,8 @@ class App {
       if (progressBar) {
         progressBar.style.transition = 'none';
         progressBar.style.transform = 'scaleX(0)';
+        // Force reflow to guarantee the bar resets visually to 0
+        void progressBar.offsetWidth;
       }
       if (progressText) progressText.textContent = 'Downloading model...';
 
@@ -1790,12 +1995,13 @@ class App {
         chunks.push(value);
         loaded += value.length;
         if (total) {
-          const percent = Math.round((loaded / total) * 100);
+          const downloadPercent = (loaded / total) * 100;
+          const globalPercent = downloadPercent * 0.10; // Map 0-100% to 0-10%
           if (progressBar) {
-             progressBar.style.transition = 'transform 0.1s linear';
-             progressBar.style.transform = `scaleX(${percent / 100})`;
+             progressBar.style.transition = 'transform 0.3s linear';
+             progressBar.style.transform = `scaleX(${globalPercent / 100})`;
           }
-          if (progressText) progressText.textContent = `Downloading model... ${percent}%`;
+          if (progressText) progressText.textContent = `Downloading model... ${Math.round(downloadPercent)}%`;
         }
       }
 

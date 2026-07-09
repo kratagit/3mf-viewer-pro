@@ -139,6 +139,40 @@ app.use('/files', express.static(DATA_DIR));
 // 3.5 Serve trash files (for previewing in trash view)
 app.use('/trash_files', express.static(TRASH_DIR));
 
+// 4. Rename file
+app.post('/api/files/:filename/rename', (req, res) => {
+  const filename = req.params.filename;
+  const newName = req.body.newName;
+
+  if (filename.includes('..') || filename.includes('/') || filename.includes('\\') ||
+      !newName || newName.includes('..') || newName.includes('/') || newName.includes('\\')) {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
+  
+  if (!newName.toLowerCase().endsWith('.3mf')) {
+    return res.status(400).json({ error: 'Must be a .3mf file' });
+  }
+
+  const oldPath = path.join(DATA_DIR, filename);
+  const newPath = path.join(DATA_DIR, newName);
+
+  if (!fs.existsSync(oldPath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+  
+  if (fs.existsSync(newPath)) {
+    return res.status(409).json({ error: 'A file with that name already exists' });
+  }
+
+  fs.rename(oldPath, newPath, (err) => {
+    if (err) {
+      console.error(`Failed to rename file:`, err);
+      return res.status(500).json({ error: 'Failed to rename file' });
+    }
+    res.json({ message: 'File renamed successfully', newName });
+  });
+});
+
 // 4. Delete files (Move to Trash)
 app.delete('/api/files/:filename', (req, res) => {
   const filename = req.params.filename;
@@ -224,7 +258,7 @@ app.post('/api/trash/:filename/restore', (req, res) => {
   });
 });
 
-// 7. Delete file permanently from trash
+// 8. Delete file permanently from trash
 app.delete('/api/trash/:filename', (req, res) => {
   const filename = req.params.filename;
   if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
