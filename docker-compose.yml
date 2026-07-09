@@ -1,0 +1,12 @@
+services:
+  app:
+    image: ghcr.io/kratagit/3mf-viewer-pro:latest
+    container_name: 3mf-viewer-app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+      - ./trash:/app/trash
+    environment:
+      - PORT=3000
