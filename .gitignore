@@ -1,0 +1,21 @@
+node_modules/
+src-tauri/target/
+dist/
+.DS_Store
+
+# npm logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# env
+.env
+.env.local
+
+# Rust
+*.rs.bk
+
+# Application Data
+data/
+trash/

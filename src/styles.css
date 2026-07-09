@@ -162,10 +162,7 @@ body::before {
 }
 
 .header-left h1 .accent {
-  background: var(--accent-gradient);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--accent-cyan);
 }
 
 .header-right {
@@ -528,11 +525,23 @@ body::before {
   color: var(--text-muted);
 }
 
-/* Delete button on card */
-.card-delete {
+/* Actions on card */
+.card-actions {
   position: absolute;
   top: 10px;
   right: 10px;
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transition: all var(--transition-fast);
+  z-index: 5;
+}
+
+.project-card:hover .card-actions {
+  opacity: 1;
+}
+
+.card-action {
   width: 30px;
   height: 30px;
   border-radius: var(--radius-full);
@@ -545,17 +554,23 @@ body::before {
   display: flex;
   align-items: center;
   justify-content: center;
-  opacity: 0;
   transition: all var(--transition-fast);
-  z-index: 5;
 }
 
-.project-card:hover .card-delete {
-  opacity: 1;
+.card-download:hover {
+  background: rgba(0, 174, 66, 0.7); /* var(--accent-cyan) */
+  color: #fff;
+  border-color: rgba(0, 174, 66, 0.5);
+}
+
+.card-restore:hover {
+  background: rgba(59, 130, 246, 0.7); /* var(--primary-light) */
+  color: #fff;
+  border-color: rgba(59, 130, 246, 0.5);
 }
 
 .card-delete:hover {
-  background: rgba(239, 68, 68, 0.7);
+  background: rgba(239, 68, 68, 0.7); /* var(--danger) */
   color: #fff;
   border-color: rgba(239, 68, 68, 0.5);
 }
@@ -892,7 +907,26 @@ body::before {
   font-size: 1.1rem;
   font-weight: 700;
   color: var(--text-primary);
-  margin-bottom: 10px;
+  margin-top: 20px;
+}
+
+.progress-bar-container {
+  width: 200px;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  margin-top: 15px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  width: 100%;
+  height: 100%;
+  background: var(--accent-cyan);
+  transform-origin: left;
+  transform: scaleX(0);
+  transition: transform 0.1s ease-out;
+  will-change: transform;
 }
 
 .modal-content p {

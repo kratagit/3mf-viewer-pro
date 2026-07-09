@@ -39,13 +39,20 @@
     </div>
     <div class="header-right">
       <span id="project-count" class="badge">0 projects</span>
-      <label for="file-input" class="btn btn-primary" id="add-files-btn">
+      <button class="btn btn-ghost" id="trash-view-btn" title="View Trash">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="3 6 5 6 21 6"></polyline>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+        </svg>
+        Trash
+      </button>
+      <button class="btn btn-primary" id="add-files-btn">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
         </svg>
         Add Files
-      </label>
-      <input type="file" id="file-input" accept=".3mf" multiple hidden>
+      </button>
+      <input type="file" id="file-upload" accept=".3mf" multiple style="display: none;">
     </div>
   </header>
 
@@ -134,10 +141,20 @@
           <div class="btn btn-icon" title="Model Color" style="padding: 2px; display: flex; align-items: center; justify-content: center; position: relative;">
             <input type="color" id="model-color-picker" value="#00AE42" style="width: 20px; height: 20px; border: none; padding: 0; background: none; cursor: pointer; border-radius: 4px;">
           </div>
+          <button id="viewer-download-btn" class="btn btn-icon" title="Download Model">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+          </button>
         </div>
         <div id="viewer-loading" class="hidden">
           <div class="spinner"></div>
-          <p>Loading 3D model...</p>
+          <p id="viewer-loading-text">Loading 3D model...</p>
+          <div class="progress-bar-container">
+            <div id="viewer-progress-bar" class="progress-bar"></div>
+          </div>
         </div>
       </div>
 

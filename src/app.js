@@ -684,6 +684,21 @@ class ModelViewer {
   }
 
   async loadModel(arrayBuffer, projectColor = null) {
+    const progressBar = document.getElementById('viewer-progress-bar');
+    const progressText = document.getElementById('viewer-loading-text');
+
+    const updateProgress = async (text, percent, transition = 'transform 0.2s ease-out') => {
+      if (progressText) progressText.textContent = text;
+      if (progressBar) {
+        progressBar.style.transition = transition;
+        progressBar.style.transform = `scaleX(${percent / 100})`;
+      }
+      // Double requestAnimationFrame ensures the compositor thread picks up the style change
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    };
+
+    await updateProgress('Extracting metadata...', 10);
+
     if (!projectColor) {
       try {
         const zip = await JSZip.loadAsync(arrayBuffer);
@@ -703,14 +718,12 @@ class ModelViewer {
           }
         }
         if (allColors.length > 0) {
-          console.log('[ColorExtract] All parsed filament colors:', allColors);
           const isBoring = (c) => {
             const u = c.toUpperCase();
             return u.startsWith('#FFFFFF') || u.startsWith('#000000') || u.startsWith('FFFFFF') || u.startsWith('000000');
           };
           const vibrant = allColors.find(c => !isBoring(c));
           projectColor = (vibrant || allColors[0]).slice(0, 7);
-          console.log('[ColorExtract] Selected vibrant color:', projectColor);
         }
       } catch (e) {
         console.warn('Could not extract color:', e);
@@ -726,6 +739,8 @@ class ModelViewer {
     const colorPicker = document.getElementById('model-color-picker');
     if (colorPicker) colorPicker.value = this.defaultColor;
 
+    await updateProgress('Preprocessing 3MF...', 25);
+
     // Cleanup previous
     if (this.model) {
       this.scene.remove(this.model);
@@ -740,9 +755,24 @@ class ModelViewer {
     }
 
     // Preprocess Bambu Studio 3MF format to fix ThreeMFLoader limitations
-    const processedBuffer = await this._preprocessBambu3MF(arrayBuffer);
+    const processedBuffer = await this._preprocessBambu3MF(arrayBuffer, (percent) => {
+      const globalPercent = 25 + (percent / 100) * 30; // Maps 0-100% JSZip to 25-55% global
+      if (progressBar) {
+        progressBar.style.transition = 'none';
+        progressBar.style.transform = `scaleX(${globalPercent / 100})`;
+      }
+      if (progressText) {
+        progressText.textContent = `Preprocessing 3MF... ${Math.round(percent)}%`;
+      }
+    });
 
-    // Parse with ThreeMFLoader
+    await updateProgress('Parsing 3D geometry...', 55, 'transform 10s cubic-bezier(0.1, 0.7, 0.1, 1)');
+    // We set progress to 95% with a long transition, then immediately block the thread.
+    // The CSS animation will run in the compositor thread.
+    if (progressBar) progressBar.style.transform = 'scaleX(0.95)';
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); // ensure transition starts
+
+    // Parse with ThreeMFLoader (Synchronous - blocks thread)
     const loader = new ThreeMFLoader();
     let group;
     try {
@@ -876,6 +906,16 @@ class ModelViewer {
     this.model = group;
     this.scene.add(group);
     this._fitCameraToModel();
+
+    if (progressBar) {
+      progressBar.style.transition = 'transform 0.2s ease-out';
+      progressBar.style.transform = 'scaleX(1)';
+    }
+    if (progressText) {
+      progressText.textContent = 'Done!';
+    }
+    // We let the UI finish before hiding the loading div (handled in _openProject)
+    await new Promise(r => setTimeout(r, 200));
   }
 
   /**
@@ -883,7 +923,7 @@ class ModelViewer {
    * the main 3dmodel.model file. This bypasses the ThreeMFLoader limitation
    * that doesn't support the p:path production extension.
    */
-  async _preprocessBambu3MF(arrayBuffer) {
+  async _preprocessBambu3MF(arrayBuffer, onProgress = null) {
     try {
       const zip = await JSZip.loadAsync(arrayBuffer);
       const modelFile = zip.file('3D/3dmodel.model');
@@ -1000,7 +1040,9 @@ class ModelViewer {
 
       const newXml = new XMLSerializer().serializeToString(doc);
       zip.file('3D/3dmodel.model', newXml);
-      return await zip.generateAsync({ type: 'arraybuffer' });
+      return await zip.generateAsync({ type: 'arraybuffer' }, (meta) => {
+        if (onProgress) onProgress(meta.percent);
+      });
     } catch (err) {
       console.warn('Failed to preprocess 3MF for Bambu Studio compatibility:', err);
       return arrayBuffer; // Return original on error
@@ -1125,20 +1167,93 @@ class App {
     this.currentProject = null;
     this.deleteTargetId = null;
     this.thumbnailUrls = new Map();
+    this.currentView = 'library'; // 'library' or 'trash'
+    this.trashFiles = [];
   }
 
   async init() {
     await this.storage.init();
-    this.projects = await this.storage.getAllProjects();
+    const allStored = await this.storage.getAllProjects();
+    this.projects = [];
+    
+    // Sync with server
+    try {
+      const response = await fetch('/api/files');
+      if (response.ok) {
+        const serverFiles = await response.json();
+        for (const sf of serverFiles) {
+          const local = allStored.find(p => p.fileName === sf.filename);
+          if (local) {
+            this.projects.push(local);
+          } else {
+            try {
+              const fRes = await fetch(sf.url);
+              if (fRes.ok) {
+                const blob = await fRes.blob();
+                const file = new File([blob], sf.filename, { type: 'application/octet-stream' });
+                await this._addFile(file);
+              }
+            } catch (err) {
+              console.error('Error downloading missing file:', sf.filename, err);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Failed to sync files from server', err);
+    }
+
     this._bindEvents();
     this._renderGrid();
     this._updateCounter();
   }
 
   _bindEvents() {
-    // File input
-    const fileInput = document.getElementById('file-input');
-    fileInput.addEventListener('change', (e) => this._handleFiles(e.target.files));
+    const addFilesBtn = document.getElementById('add-files-btn');
+    const fileUpload = document.getElementById('file-upload');
+    if (addFilesBtn && fileUpload) {
+      addFilesBtn.addEventListener('click', () => {
+        fileUpload.click();
+      });
+      
+      fileUpload.addEventListener('change', async (e) => {
+        if (e.target.files && e.target.files.length > 0) {
+          await this._uploadFiles(e.target.files);
+        }
+      });
+    }
+
+    const trashBtn = document.getElementById('trash-view-btn');
+    if (trashBtn) {
+      trashBtn.addEventListener('click', async () => {
+        if (this.currentView === 'library') {
+          this.currentView = 'trash';
+          trashBtn.innerHTML = `
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+              <polyline points="9 22 9 12 15 12 15 22"></polyline>
+            </svg>
+            Library
+          `;
+          trashBtn.classList.remove('btn-ghost');
+          trashBtn.classList.add('btn-primary');
+          await this._loadTrash();
+        } else {
+          this.currentView = 'library';
+          trashBtn.innerHTML = `
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"></polyline>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+            </svg>
+            Trash
+          `;
+          trashBtn.classList.remove('btn-primary');
+          trashBtn.classList.add('btn-ghost');
+          this._renderGrid();
+          this._updateCounter();
+        }
+      });
+    }
 
     // Drag & drop
     let dragCounter = 0;
@@ -1172,6 +1287,10 @@ class App {
 
     // Download
     document.getElementById('download-btn').addEventListener('click', () => this._downloadCurrent());
+    const viewerDownloadBtn = document.getElementById('viewer-download-btn');
+    if (viewerDownloadBtn) {
+      viewerDownloadBtn.addEventListener('click', () => this._downloadCurrent());
+    }
 
     // Viewer controls
     document.getElementById('reset-camera-btn').addEventListener('click', () => {
@@ -1217,21 +1336,44 @@ class App {
     });
   }
 
-  async _handleFiles(fileList) {
+  async _uploadFiles(fileList) {
     const files = Array.from(fileList).filter((f) => f.name.toLowerCase().endsWith('.3mf'));
     if (files.length === 0) {
       Toast.show('No .3mf files found', 'error');
       return;
     }
-    for (const file of files) {
-      try {
-        await this._addFile(file);
-      } catch (err) {
-        console.error('Error parsing file:', file.name, err);
-        Toast.show(`Error parsing: ${file.name}`, 'error');
+
+    const formData = new FormData();
+    files.forEach(file => formData.append('files', file));
+
+    try {
+      Toast.show('Uploading files...', 'info', 2000);
+      const response = await fetch('/upload', {
+        method: 'POST',
+        body: formData
+      });
+      if (!response.ok) throw new Error('Upload failed');
+      
+      // After successful upload, parse and add to local display
+      for (const file of files) {
+        try {
+          await this._addFile(file);
+        } catch (err) {
+          console.error('Error parsing file:', file.name, err);
+          Toast.show(`Error parsing: ${file.name}`, 'error');
+        }
       }
+      
+      const fileInput = document.getElementById('file-upload');
+      if (fileInput) fileInput.value = '';
+    } catch (err) {
+      console.error('Error uploading:', err);
+      Toast.show('Upload failed', 'error');
     }
-    document.getElementById('file-input').value = '';
+  }
+
+  async _handleFiles(fileList) {
+    await this._uploadFiles(fileList);
   }
 
   async _addFile(file) {
@@ -1262,12 +1404,17 @@ class App {
   }
 
   async _deleteProject(id) {
-    await this.storage.deleteProject(id);
-    this.projects = this.projects.filter((p) => p.id !== id);
-    if (this.thumbnailUrls.has(id)) {
-      URL.revokeObjectURL(this.thumbnailUrls.get(id));
-      this.thumbnailUrls.delete(id);
+    const project = this.projects.find((p) => p.id === id);
+    if (project) {
+      try {
+        await fetch(`/api/files/${encodeURIComponent(project.fileName)}`, { method: 'DELETE' });
+      } catch (err) {
+        console.error('Failed to delete from server:', err);
+      }
     }
+    
+    // Do not delete from storage yet, so we keep the thumbnail for the trash view
+    this.projects = this.projects.filter((p) => p.id !== id);
     this._renderGrid();
     this._updateCounter();
     Toast.show('Project deleted', 'success');
@@ -1277,9 +1424,18 @@ class App {
     const grid = document.getElementById('projects-grid');
     const empty = document.getElementById('empty-state');
 
-    if (this.projects.length === 0) {
+    const listToRender = this.currentView === 'trash' ? this.trashFiles : this.projects;
+
+    if (listToRender.length === 0) {
       grid.classList.add('hidden');
       empty.classList.remove('hidden');
+      if (this.currentView === 'trash') {
+        empty.querySelector('h2').textContent = 'Trash is empty';
+        empty.querySelector('p').textContent = 'Deleted projects will appear here';
+      } else {
+        empty.querySelector('h2').textContent = 'No Projects';
+        empty.querySelector('p').textContent = 'Drag & drop .3mf files here or click "Add Files" to get started';
+      }
       return;
     }
 
@@ -1287,12 +1443,12 @@ class App {
     grid.classList.remove('hidden');
     grid.innerHTML = '';
 
-    const sorted = [...this.projects].sort(
-      (a, b) => new Date(b.dateAdded) - new Date(a.dateAdded)
+    const sorted = [...listToRender].sort(
+      (a, b) => new Date(b.dateAdded || 0) - new Date(a.dateAdded || 0)
     );
 
-    for (const project of sorted) {
-      grid.appendChild(this._createCard(project));
+    for (const item of sorted) {
+      grid.appendChild(this._createCard(item));
     }
   }
 
@@ -1319,42 +1475,146 @@ class App {
         </div>`;
     }
 
-    const profileText = project.profiles?.printProfile || '';
-    const projectTitle = project.profiles?.title || '';
+    const dateAdded = project.dateAdded ? new Date(project.dateAdded) : new Date();
+    const dateStr = dateAdded.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 
     card.innerHTML = `
       <div class="card-thumbnail">${thumbnailHtml}</div>
       <div class="card-info">
         <div class="card-title" title="${project.fileName}">${project.fileName}</div>
-        ${projectTitle ? `<div class="card-print-title" title="${projectTitle}">${projectTitle}</div>` : ''}
         <div class="card-meta">
-          ${profileText ? `<span class="card-profile" title="${profileText}">${profileText}</span>` : ''}
-          <span class="card-size">${formatFileSize(project.fileSize)}</span>
-          <span class="card-date">${formatDate(project.dateAdded)}</span>
+          <span class="card-size">${(project.fileSize ? (project.fileSize / 1024 / 1024).toFixed(2) : '0.00')} MB</span>
+          <span class="card-date">${dateStr}</span>
         </div>
       </div>
-      <button class="card-delete" title="Delete project">✕</button>`;
+      <div class="card-actions">
+        ${this.currentView === 'trash' ? `
+          <div class="card-action card-restore" title="Restore" data-filename="${project.filename}">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="9 14 4 9 9 4"></polyline>
+              <path d="M20 20v-7a4 4 0 0 0-4-4H4"></path>
+            </svg>
+          </div>
+          <div class="card-action card-delete" title="Delete Permanently" data-filename="${project.filename}">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 6h18"></path>
+              <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+              <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+            </svg>
+          </div>
+        ` : `
+          <div class="card-action card-download" title="Download" data-filename="${project.fileName}">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+          </div>
+          <div class="card-action card-delete" title="Delete" data-id="${project.id}">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 6h18"></path>
+              <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path>
+              <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path>
+            </svg>
+          </div>
+        `}
+      </div>
+    `;
 
-    card.addEventListener('click', (e) => {
-      if (e.target.closest('.card-delete')) return;
-      this._openProject(project.id);
-    });
-
-    card.querySelector('.card-delete').addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.deleteTargetId = project.id;
-      document.getElementById('delete-modal-text').textContent =
-        `Are you sure you want to delete "${project.fileName}" from your library?`;
-      document.getElementById('delete-modal').classList.remove('hidden');
-    });
+    // Events
+    if (this.currentView === 'library') {
+      card.addEventListener('click', () => this._openProject(project.id));
+      card.querySelector('.card-download').addEventListener('click', (e) => {
+        e.stopPropagation();
+        const a = document.createElement('a');
+        a.href = `/files/${encodeURIComponent(project.fileName)}`;
+        a.download = project.fileName;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        Toast.show(`Downloading: ${project.fileName}`, 'success');
+      });
+      card.querySelector('.card-delete').addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.deleteTargetId = project.id;
+        document.getElementById('delete-modal-text').textContent =
+          `Are you sure you want to move "${project.fileName}" to trash?`;
+        document.getElementById('delete-modal').classList.remove('hidden');
+      });
+    } else {
+      // Trash events
+      card.querySelector('.card-restore').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try {
+          const res = await fetch(`/api/trash/${encodeURIComponent(project.filename)}/restore`, { method: 'POST' });
+          if (res.ok) {
+            Toast.show('Project restored', 'success');
+            await this._loadTrash();
+            this.init(); // resync library from server
+          } else {
+            Toast.show('Failed to restore project', 'error');
+          }
+        } catch(err) { console.error(err); }
+      });
+      card.querySelector('.card-delete').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (confirm(`Are you sure you want to permanently delete "${project.fileName}"? This cannot be undone.`)) {
+          try {
+            const res = await fetch(`/api/trash/${encodeURIComponent(project.filename)}`, { method: 'DELETE' });
+            if (res.ok) {
+              if (project.id) {
+                await this.storage.deleteProject(project.id);
+                if (this.thumbnailUrls.has(project.id)) {
+                  URL.revokeObjectURL(this.thumbnailUrls.get(project.id));
+                  this.thumbnailUrls.delete(project.id);
+                }
+              }
+              Toast.show('Project permanently deleted', 'success');
+              await this._loadTrash();
+            }
+          } catch(err) { console.error(err); }
+        }
+      });
+    }
 
     return card;
   }
 
+  async _loadTrash() {
+    try {
+      const allStored = await this.storage.getAllProjects();
+      const res = await fetch('/api/trash');
+      if (res.ok) {
+        const list = await res.json();
+        this.trashFiles = list.map(item => {
+          const local = allStored.find(p => p.fileName === item.originalName);
+          return {
+            id: local ? local.id : null,
+            thumbnail: local ? local.thumbnail : null,
+            filename: item.filename, // the server ID
+            fileName: item.originalName, // for UI
+            fileSize: local ? local.fileSize : item.size,
+            dateAdded: new Date(parseInt(item.filename.split('_')[0]) || Date.now()) // from timestamp
+          };
+        });
+        this._renderGrid();
+        this._updateCounter();
+      }
+    } catch(err) {
+      console.error('Failed to load trash:', err);
+    }
+  }
+
   _updateCounter() {
-    const n = this.projects.length;
-    document.getElementById('project-count').textContent =
-      n === 0 ? '0 projects' : n === 1 ? '1 project' : `${n} projects`;
+    if (this.currentView === 'trash') {
+      const n = this.trashFiles.length;
+      document.getElementById('project-count').textContent =
+        n === 0 ? 'Trash empty' : n === 1 ? '1 item' : `${n} items`;
+    } else {
+      const n = this.projects.length;
+      document.getElementById('project-count').textContent =
+        n === 0 ? '0 projects' : n === 1 ? '1 project' : `${n} projects`;
+    }
   }
 
   async _openProject(id) {
@@ -1385,7 +1645,42 @@ class App {
 
     // Load model
     try {
-      const fileData = await this.storage.getFileData(id);
+      const progressBar = document.getElementById('viewer-progress-bar');
+      const progressText = document.getElementById('viewer-loading-text');
+      if (progressBar) {
+        progressBar.style.transition = 'none';
+        progressBar.style.transform = 'scaleX(0)';
+      }
+      if (progressText) progressText.textContent = 'Downloading model...';
+
+      const response = await fetch(`/files/${encodeURIComponent(project.fileName)}`);
+      if (!response.ok) throw new Error('File not found on server');
+
+      const contentLength = response.headers.get('content-length');
+      const total = parseInt(contentLength, 10);
+      let loaded = 0;
+
+      const reader = response.body.getReader();
+      const chunks = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        loaded += value.length;
+        if (total) {
+          const percent = Math.round((loaded / total) * 100);
+          if (progressBar) {
+             progressBar.style.transition = 'transform 0.1s linear';
+             progressBar.style.transform = `scaleX(${percent / 100})`;
+          }
+          if (progressText) progressText.textContent = `Downloading model... ${percent}%`;
+        }
+      }
+
+      if (progressText) progressText.textContent = 'Processing 3D model...';
+      const fileData = await new Blob(chunks).arrayBuffer();
+      
       if (fileData) {
         let color = project.profiles?.color;
         if (!color && project.settings && project.settings.filament_colour) {
@@ -1427,18 +1722,12 @@ class App {
   async _downloadCurrent() {
     if (!this.currentProject) return;
     try {
-      const fileData = await this.storage.getFileData(this.currentProject.id);
-      if (!fileData) { Toast.show('File data not found', 'error'); return; }
-
-      const blob = new Blob([fileData], { type: 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml' });
-      const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url;
+      a.href = `/files/${encodeURIComponent(this.currentProject.fileName)}`;
       a.download = this.currentProject.fileName;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
       Toast.show(`Downloaded: ${this.currentProject.fileName}`, 'success');
     } catch (err) {
       console.error('Download error:', err);
