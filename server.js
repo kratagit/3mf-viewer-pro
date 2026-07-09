@@ -14,6 +14,8 @@ app.use(express.static(path.join(__dirname, 'src')));
 // Ensure data and trash directories exist
 const DATA_DIR = path.join(__dirname, 'data');
 const TRASH_DIR = path.join(__dirname, 'trash');
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
@@ -21,10 +23,41 @@ if (!fs.existsSync(TRASH_DIR)) {
   fs.mkdirSync(TRASH_DIR, { recursive: true });
 }
 
-// 90 days in milliseconds
-const TRASH_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+// Default settings
+let serverSettings = {
+  trashRetentionDays: 90
+};
+
+// Load settings if exists
+if (fs.existsSync(SETTINGS_FILE)) {
+  try {
+    const data = fs.readFileSync(SETTINGS_FILE, 'utf8');
+    serverSettings = { ...serverSettings, ...JSON.parse(data) };
+  } catch (err) {
+    console.error('Failed to load settings.json', err);
+  }
+}
+
+// Save settings helper
+function saveServerSettings(newSettings) {
+  serverSettings = { ...serverSettings, ...newSettings };
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(serverSettings, null, 2));
+}
+
+// Server Settings API
+app.use(express.json()); // Ensure JSON body parsing is available
+
+app.get('/api/settings', (req, res) => {
+  res.json(serverSettings);
+});
+
+app.post('/api/settings', (req, res) => {
+  saveServerSettings(req.body);
+  res.json({ message: 'Settings saved successfully', settings: serverSettings });
+});
 
 function cleanupTrash() {
+  const TRASH_RETENTION_MS = serverSettings.trashRetentionDays * 24 * 60 * 60 * 1000;
   fs.readdir(TRASH_DIR, (err, files) => {
     if (err) {
       console.error('Failed to read trash directory for cleanup:', err);

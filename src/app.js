@@ -1122,12 +1122,16 @@ class ModelViewer {
 // ─────────────────────────────────────
 
 class Toast {
-  static show(message, type = 'success', duration = 3500) {
+  static show(message, type = 'success', duration = 3500, showIcon = true) {
     const container = document.getElementById('toast-container');
     const toast = document.createElement('div');
     toast.className = `toast ${type}`;
-    const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : 'ℹ️';
-    toast.innerHTML = `<span class="toast-icon">${icon}</span><span>${message}</span>`;
+    if (showIcon) {
+      const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : 'ℹ️';
+      toast.innerHTML = `<span class="toast-icon">${icon}</span><span>${message}</span>`;
+    } else {
+      toast.innerHTML = `<span>${message}</span>`;
+    }
     container.appendChild(toast);
     setTimeout(() => {
       toast.classList.add('toast-out');
@@ -1169,6 +1173,9 @@ class App {
     this.thumbnailUrls = new Map();
     this.currentView = 'library'; // 'library' or 'trash'
     this.trashFiles = [];
+    this.settings = {
+      gridColumns: 'auto'
+    };
   }
 
   async init() {
@@ -1203,9 +1210,39 @@ class App {
       console.error('Failed to sync files from server', err);
     }
 
+    // Load frontend settings
+    const storedCols = localStorage.getItem('3mf_settings_gridColumns');
+    if (storedCols) {
+      this.settings.gridColumns = storedCols;
+    }
+    this._applySettings();
+
+    // Load backend settings
+    try {
+      const settingsRes = await fetch('/api/settings');
+      if (settingsRes.ok) {
+        const sData = await settingsRes.json();
+        this.settings.trashDays = sData.trashRetentionDays || 90;
+      }
+    } catch (e) {
+      console.warn('Could not load backend settings', e);
+      this.settings.trashDays = 90;
+    }
+
     this._bindEvents();
     this._renderGrid();
     this._updateCounter();
+  }
+
+  _applySettings() {
+    const grid = document.getElementById('projects-grid');
+    if (grid) {
+      if (this.settings.gridColumns === 'auto') {
+        grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(220px, 1fr))';
+      } else {
+        grid.style.gridTemplateColumns = `repeat(${this.settings.gridColumns}, 1fr)`;
+      }
+    }
   }
 
   _bindEvents() {
@@ -1220,6 +1257,90 @@ class App {
         if (e.target.files && e.target.files.length > 0) {
           await this._uploadFiles(e.target.files);
         }
+      });
+    }
+
+    // Settings Modal
+    const settingsBtn = document.getElementById('settings-btn');
+    const settingsModal = document.getElementById('settings-modal');
+    const closeSettings = document.getElementById('close-settings');
+    const saveSettings = document.getElementById('save-settings');
+    
+    // Custom Select Logic
+    const selectSelected = document.querySelector('.select-selected');
+    const selectItemsContainer = document.querySelector('.select-items');
+    let currentSelectedValue = this.settings.gridColumns;
+
+    if (selectSelected && selectItemsContainer) {
+      selectSelected.addEventListener('click', function(e) {
+        e.stopPropagation();
+        this.classList.toggle('select-arrow-active');
+        selectItemsContainer.classList.toggle('select-hide');
+      });
+
+      const items = selectItemsContainer.querySelectorAll('div');
+      items.forEach(item => {
+        item.addEventListener('click', function(e) {
+          selectSelected.innerHTML = this.innerHTML;
+          currentSelectedValue = this.getAttribute('data-value');
+          selectSelected.click();
+        });
+      });
+
+      document.addEventListener('click', () => {
+        selectSelected.classList.remove('select-arrow-active');
+        selectItemsContainer.classList.add('select-hide');
+      });
+    }
+
+    if (settingsBtn && settingsModal) {
+      settingsBtn.addEventListener('click', () => {
+        currentSelectedValue = this.settings.gridColumns;
+        if (selectSelected) {
+          const activeItem = document.querySelector(`.select-items div[data-value="${currentSelectedValue}"]`);
+          if (activeItem) selectSelected.innerHTML = activeItem.innerHTML;
+        }
+        
+        const trashDaysInput = document.getElementById('trash-days-input');
+        if (trashDaysInput) {
+          trashDaysInput.value = this.settings.trashDays || 90;
+        }
+        
+        settingsModal.classList.remove('hidden');
+      });
+      closeSettings.addEventListener('click', () => settingsModal.classList.add('hidden'));
+      saveSettings.addEventListener('click', async () => {
+        if (currentSelectedValue === 'auto') {
+          this.settings.gridColumns = 'auto';
+        } else {
+          const cols = parseInt(currentSelectedValue) || 3;
+          this.settings.gridColumns = Math.max(1, Math.min(10, cols));
+        }
+        localStorage.setItem('3mf_settings_gridColumns', this.settings.gridColumns);
+        this._applySettings();
+        
+        const trashDaysInput = document.getElementById('trash-days-input');
+        if (trashDaysInput) {
+          let tDays = parseInt(trashDaysInput.value);
+          if (isNaN(tDays) || tDays < 1) tDays = 90;
+          this.settings.trashDays = tDays;
+          
+          try {
+            await fetch('/api/settings', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ trashRetentionDays: this.settings.trashDays })
+            });
+          } catch(e) {
+            console.error('Failed to save backend settings', e);
+          }
+        }
+        
+        settingsModal.classList.add('hidden');
+        Toast.show('Settings saved', 'success', 3500, false);
+      });
+      settingsModal.addEventListener('click', (e) => {
+        if (e.target === settingsModal) settingsModal.classList.add('hidden');
       });
     }
 
@@ -1476,7 +1597,7 @@ class App {
     }
 
     const dateAdded = project.dateAdded ? new Date(project.dateAdded) : new Date();
-    const dateStr = dateAdded.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    const dateStr = dateAdded.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
 
     card.innerHTML = `
       <div class="card-thumbnail">${thumbnailHtml}</div>
