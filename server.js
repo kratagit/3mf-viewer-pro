@@ -14,6 +14,8 @@ app.use(express.static(path.join(__dirname, 'src')));
 // Ensure data and trash directories exist
 const DATA_DIR = path.join(__dirname, 'data');
 const TRASH_DIR = path.join(__dirname, 'trash');
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
@@ -21,10 +23,41 @@ if (!fs.existsSync(TRASH_DIR)) {
   fs.mkdirSync(TRASH_DIR, { recursive: true });
 }
 
-// 90 days in milliseconds
-const TRASH_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+// Default settings
+let serverSettings = {
+  trashRetentionDays: 90
+};
+
+// Load settings if exists
+if (fs.existsSync(SETTINGS_FILE)) {
+  try {
+    const data = fs.readFileSync(SETTINGS_FILE, 'utf8');
+    serverSettings = { ...serverSettings, ...JSON.parse(data) };
+  } catch (err) {
+    console.error('Failed to load settings.json', err);
+  }
+}
+
+// Save settings helper
+function saveServerSettings(newSettings) {
+  serverSettings = { ...serverSettings, ...newSettings };
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(serverSettings, null, 2));
+}
+
+// Server Settings API
+app.use(express.json()); // Ensure JSON body parsing is available
+
+app.get('/api/settings', (req, res) => {
+  res.json(serverSettings);
+});
+
+app.post('/api/settings', (req, res) => {
+  saveServerSettings(req.body);
+  res.json({ message: 'Settings saved successfully', settings: serverSettings });
+});
 
 function cleanupTrash() {
+  const TRASH_RETENTION_MS = serverSettings.trashRetentionDays * 24 * 60 * 60 * 1000;
   fs.readdir(TRASH_DIR, (err, files) => {
     if (err) {
       console.error('Failed to read trash directory for cleanup:', err);
@@ -105,6 +138,40 @@ app.use('/files', express.static(DATA_DIR));
 
 // 3.5 Serve trash files (for previewing in trash view)
 app.use('/trash_files', express.static(TRASH_DIR));
+
+// 4. Rename file
+app.post('/api/files/:filename/rename', (req, res) => {
+  const filename = req.params.filename;
+  const newName = req.body.newName;
+
+  if (filename.includes('..') || filename.includes('/') || filename.includes('\\') ||
+      !newName || newName.includes('..') || newName.includes('/') || newName.includes('\\')) {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
+  
+  if (!newName.toLowerCase().endsWith('.3mf')) {
+    return res.status(400).json({ error: 'Must be a .3mf file' });
+  }
+
+  const oldPath = path.join(DATA_DIR, filename);
+  const newPath = path.join(DATA_DIR, newName);
+
+  if (!fs.existsSync(oldPath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+  
+  if (fs.existsSync(newPath)) {
+    return res.status(409).json({ error: 'A file with that name already exists' });
+  }
+
+  fs.rename(oldPath, newPath, (err) => {
+    if (err) {
+      console.error(`Failed to rename file:`, err);
+      return res.status(500).json({ error: 'Failed to rename file' });
+    }
+    res.json({ message: 'File renamed successfully', newName });
+  });
+});
 
 // 4. Delete files (Move to Trash)
 app.delete('/api/files/:filename', (req, res) => {
@@ -191,7 +258,7 @@ app.post('/api/trash/:filename/restore', (req, res) => {
   });
 });
 
-// 7. Delete file permanently from trash
+// 8. Delete file permanently from trash
 app.delete('/api/trash/:filename', (req, res) => {
   const filename = req.params.filename;
   if (filename.includes('..') || filename.includes('/') || filename.includes('\\')) {
